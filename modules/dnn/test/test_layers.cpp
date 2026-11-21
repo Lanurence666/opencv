@@ -2667,6 +2667,71 @@ TEST_P(Layer_Test_Resize, change_input)
     }
 }
 
+// dynamicOutputShapes() must classify only configurations with explicit fixed
+// output sizes as static; zoom factors and scales produce input-dependent
+// output shapes and must report dynamic.
+static bool resize2Dynamic(Net& net)
+{
+    Ptr<Graph> g = net.getMainGraph();
+    CV_Assert(g);
+    int found = 0;
+    bool dyn = false;
+    for (const Ptr<LayerInfo>& l : g->prog())
+    {
+        if (l && l->type == "Resize2")
+        {
+            found++;
+            dyn = l->dynamicOutputShapes();
+        }
+    }
+    EXPECT_EQ(1, found) << "expected exactly one Resize2 layer";
+    return dyn;
+}
+
+// Minimal Resize models: [X, "", scales] with scales=[1,1,2,2] (folded into
+// zoom factors by the importer) and [X, "", "", sizes] with sizes=[1,3,5,7]
+// (folded into width/height). See gen_resize_test_bytes.py for the source.
+static const unsigned char rz_scales_onnx[] = {8, 8, 58, 239, 1, 10, 129, 1, 10, 1, 120, 10, 0, 10, 6, 115, 99, 97, 108, 101, 115, 18, 1, 121, 26, 8, 114, 101, 115, 105, 122, 101, 46, 48, 34, 6, 82, 101, 115, 105, 122, 101, 42, 47, 10, 30, 99, 111, 111, 114, 100, 105, 110, 97, 116, 101, 95, 116, 114, 97, 110, 115, 102, 111, 114, 109, 97, 116, 105, 111, 110, 95, 109, 111, 100, 101, 34, 10, 97, 115, 121, 109, 109, 101, 116, 114, 105, 99, 160, 1, 3, 42, 18, 10, 4, 109, 111, 100, 101, 34, 7, 110, 101, 97, 114, 101, 115, 116, 160, 1, 3, 42, 24, 10, 12, 110, 101, 97, 114, 101, 115, 116, 95, 109, 111, 100, 101, 34, 5, 102, 108, 111, 111, 114, 160, 1, 3, 18, 15, 114, 101, 115, 105, 122, 101, 95, 99, 108, 115, 95, 116, 101, 115, 116, 42, 30, 8, 4, 16, 1, 34, 16, 0, 0, 128, 63, 0, 0, 128, 63, 0, 0, 0, 64, 0, 0, 0, 64, 66, 6, 115, 99, 97, 108, 101, 115, 90, 27, 10, 1, 120, 18, 22, 10, 20, 8, 1, 18, 16, 10, 2, 8, 1, 10, 2, 8, 3, 10, 2, 8, 8, 10, 2, 8, 8, 98, 27, 10, 1, 121, 18, 22, 10, 20, 8, 1, 18, 16, 10, 2, 8, 1, 10, 2, 8, 3, 10, 2, 8, 16, 10, 2, 8, 16, 66, 4, 10, 0, 16, 17};
+static const size_t rz_scales_onnx_len = sizeof(rz_scales_onnx);
+static const unsigned char rz_sizes_onnx[] = {8, 8, 58, 227, 1, 10, 130, 1, 10, 1, 120, 10, 0, 10, 0, 10, 5, 115, 105, 122, 101, 115, 18, 1, 121, 26, 8, 114, 101, 115, 105, 122, 101, 46, 48, 34, 6, 82, 101, 115, 105, 122, 101, 42, 47, 10, 30, 99, 111, 111, 114, 100, 105, 110, 97, 116, 101, 95, 116, 114, 97, 110, 115, 102, 111, 114, 109, 97, 116, 105, 111, 110, 95, 109, 111, 100, 101, 34, 10, 97, 115, 121, 109, 109, 101, 116, 114, 105, 99, 160, 1, 3, 42, 18, 10, 4, 109, 111, 100, 101, 34, 7, 110, 101, 97, 114, 101, 115, 116, 160, 1, 3, 42, 24, 10, 12, 110, 101, 97, 114, 101, 115, 116, 95, 109, 111, 100, 101, 34, 5, 102, 108, 111, 111, 114, 160, 1, 3, 18, 15, 114, 101, 115, 105, 122, 101, 95, 99, 108, 115, 95, 116, 101, 115, 116, 42, 17, 8, 4, 16, 7, 58, 4, 1, 3, 5, 7, 66, 5, 115, 105, 122, 101, 115, 90, 27, 10, 1, 120, 18, 22, 10, 20, 8, 1, 18, 16, 10, 2, 8, 1, 10, 2, 8, 3, 10, 2, 8, 8, 10, 2, 8, 8, 98, 27, 10, 1, 121, 18, 22, 10, 20, 8, 1, 18, 16, 10, 2, 8, 1, 10, 2, 8, 3, 10, 2, 8, 5, 10, 2, 8, 7, 66, 4, 10, 0, 16, 17};
+static const size_t rz_sizes_onnx_len = sizeof(rz_sizes_onnx);
+
+TEST_P(Layer_Test_Resize, dynamic_output_shapes)
+{
+    int backendId = get<0>(GetParam());
+    int targetId = get<1>(GetParam());
+    if (backendId != DNN_BACKEND_OPENCV)
+        throw SkipTestException("Resize2 layer is implemented for the OpenCV backend only");
+
+    const int inShape[] = {1, 3, 8, 8};
+    Mat inp(4, inShape, CV_32F);
+    randu(inp, -1, 1);
+
+    // constant scales fold into zoom factors: out = in * scale -> dynamic
+    {
+        Net net = readNetFromONNX(reinterpret_cast<const char*>(rz_scales_onnx),
+                                  rz_scales_onnx_len, ENGINE_OPENCV);
+        net.setInput(inp);
+        net.setPreferableBackend(backendId);
+        net.setPreferableTarget(targetId);
+        Mat out = net.forward();
+        ASSERT_EQ(MatShape({1, 3, 16, 16}), out.shape());
+        EXPECT_TRUE(resize2Dynamic(net)) << "scale-based Resize must be dynamic";
+    }
+
+    // constant sizes fold into width/height: fixed output -> static
+    {
+        Net net = readNetFromONNX(reinterpret_cast<const char*>(rz_sizes_onnx),
+                                  rz_sizes_onnx_len, ENGINE_OPENCV);
+        net.setInput(inp);
+        net.setPreferableBackend(backendId);
+        net.setPreferableTarget(targetId);
+        Mat out = net.forward();
+        ASSERT_EQ(MatShape({1, 3, 5, 7}), out.shape());
+        EXPECT_FALSE(resize2Dynamic(net)) << "sizes-based Resize must be static";
+    }
+}
+
 // ONNX folds a constant "scales" input of Resize into zoom_factor_x/y.  The sampling
 // step along an axis is then 1/scale, which is not the same as in/out whenever in*scale
 // is not integral: a 4x5 input with scales=0.5 gives a 2x2 output, so the step is 2 and

@@ -958,10 +958,16 @@ public:
     {
         if (dynamicROI) return true;
         size_t ninputs = inputs.size();
-        if (ninputs <= 1 &&
-            ((outWidth0 > 0 && outHeight0 > 0) ||
-            (zoomFactorWidth > 0 && zoomFactorHeight > 0)))
+        // Only explicit fixed output sizes are static.
+        if (ninputs <= 1 && (outWidth0 > 0 && outHeight0 > 0))
             return false;
+        // Baked "sizes"/"scales" blobs (ONNX importer): sizes fix the output,
+        // scales make it input-dependent.
+        if (ninputs <= 1 && !this->blobs.empty())
+            return !(this->blobs.size() >= 3 && this->blobs[2].total() > 0);
+        // Zoom factors scale the input shape.
+        if (ninputs <= 1 && (zoomFactorWidth > 0 || zoomFactorHeight > 0))
+            return true;
         Net::Impl* netimpl_ = getNetImpl(this);
         if (!netimpl_)
             return true;
@@ -969,7 +975,16 @@ public:
             if (!netimpl_->isConstArg(inputs[i]))
                 return true;
         }
-        return false;
+        // Constant auxiliary inputs: a non-empty sizes tensor fixes the output,
+        // otherwise scales make it input-dependent.
+        if (ninputs >= 4) {
+            Mat sizesTensor = netimpl_->argTensor(inputs[3]);
+            std::vector<int> sizes;
+            tensorToIntVec(sizesTensor, sizes);
+            if (!sizes.empty())
+                return false;
+        }
+        return true;
     }
 
     int getLayouts(const std::vector<DataLayout>& actualInputs,
